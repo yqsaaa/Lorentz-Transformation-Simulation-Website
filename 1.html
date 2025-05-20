@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Lorentz Demo with Enhanced Markers and Editing</title>
+  <style>
+    html, body {
+      margin: 0; 
+      padding: 0; 
+      width: 100%; 
+      height: 100%;
+      overflow: hidden;
+      font-family: Arial, sans-serif;
+    }
+    body {
+      display: flex;
+      height: 100vh;
+      flex-direction: row;
+    }
+    .left-panel {
+      flex-grow: 1;
+      display: flex;
+      flex-direction: column;
+    }
+    canvas {
+      flex-grow: 1;
+      cursor: grab;
+      border: 1px solid black;
+      display: block;
+    }
+    canvas.marker-mode {
+      cursor: crosshair;
+    }
+    .controls {
+      padding: 10px;
+      background: #eee;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+    }
+    .control-group {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .color-picker input[type="color"] {
+      width: 30px;
+      height: 30px;
+      border: none;
+      cursor: pointer;
+    }
+    button {
+      cursor: pointer;
+      padding: 6px 14px;
+      border-radius: 4px;
+      border: none;
+      background: #4285F4;
+      color: white;
+      font-weight: bold;
+    }
+    button:active {
+      background: #306fd0;
+    }
+    .right-panel {
+      width: 320px;
+      background: #f7f7f7;
+      border-left: 1px solid #ccc;
+      overflow-y: auto;
+      padding: 10px;
+    }
+    .list-title {
+      font-weight: bold;
+      margin-bottom: 8px;
+    }
+    .item-list {
+      margin: 0; 
+      padding: 0; 
+      list-style: none;
+    }
+    .item {
+      background: white;
+      margin-bottom: 6px;
+      padding: 6px 8px;
+      border-radius: 4px;
+      border: 1px solid #ccc;
+      cursor: pointer;
+    }
+    .item.selected {
+      border-color: #4285F4;
+      background: #d6e4ff;
+    }
+    .item label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .item label input[type="color"] {
+      cursor: pointer;
+    }
+    .delete-btn {
+      background: #f44336;
+      border: none;
+      color: white;
+      font-weight: bold;
+      margin-left: auto;
+      padding: 2px 6px;
+      border-radius: 3px;
+      cursor: pointer;
+    }
+    .mode-label {
+      font-weight: bold;
+      user-select: none;
+    }
+    select {
+      cursor: pointer;
+      padding: 4px 8px;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <div class="left-panel">
+    <div class="controls">
+      <button id="modeBtn">标记模式</button>
+      <button id="connectBtn">连接两点</button>
+      <div class="control-group">
+        Speed (v/c):
+        <input type="range" id="vSlider" min="-0.99" max="0.99" step="0.01" value="0" style="width:120px;">
+        <input type="number" id="vInput" min="-0.99" max="0.99" step="0.01" value="0" style="width:60px;">
+      </div>
+    </div>
+    <canvas id="xtCanvas"></canvas>
+  </div>
+  <div class="right-panel">
+    <div class="list-title">标注点</div>
+    <ul id="pointList" class="item-list"></ul>
+    <div class="list-title">标注线</div>
+    <ul id="lineList" class="item-list"></ul>
+    <div style="margin-top:15px;">
+      <button id="clearAllBtn" style="width:100%;">清除所有标记</button>
+    </div>
+  </div>
+
+  <script>
+    (() => {
+      const canvas = document.getElementById('xtCanvas'),
+            ctx = canvas.getContext('2d');
+      const vSlider = document.getElementById('vSlider'),
+            vInput = document.getElementById('vInput');
+      const modeBtn = document.getElementById('modeBtn');
+      const pointListEl = document.getElementById('pointList');
+      const lineListEl = document.getElementById('lineList');
+      const clearAllBtn = document.getElementById('clearAllBtn');
+
+      let SCALE = 30, offsetX = 0, offsetY = 0;
+      let isDragging = false, lastX = 0, lastY = 0;
+      let isMarkerMode = true;
+
+      let isConnectingPoints = false; // 新增状态变量
+      let connectStartPoint = null;   // 存储第一个点
+
+      let markedPoints = [];
+      let lines = [];
+
+      let nextId = 1;
+
+      let selectedItem = null; // {type: 'point'|'line', id: number}
+
+      let animationFrameId = null;
+
+      const lineTypes = ['segment', 'ray', 'line'];
+
+      const connectBtn = document.getElementById('connectBtn');
+
+      function toCanvasX(x) {
+        return canvas.width / 2 + (x + offsetX) * SCALE;
+      }
+      function toCanvasY(t) {
+        return canvas.height / 2 - (t + offsetY) * SCALE;
+      }
+      function toPhysicsX(cx) {
+        return (cx - canvas.width / 2) / SCALE - offsetX;
+      }
+      function toPhysicsT(cy) {
+        return (canvas.height / 2 - cy) / SCALE - offsetY;
+      }
+
+      function lorentzTransform(x, t, v) {
+        const gamma = 1 / Math.sqrt(1 - v * v);
+        return { x: gamma * (x - v * t), t: gamma * (t - v * x) };
+      }
+      function inverseLorentzTransform(x, t, v) {
+        const gamma = 1 / Math.sqrt(1 - v * v);
+        return { x: gamma * (x + v * t), t: gamma * (t + v * x) };
+      }
+
+      function resizeCanvas() {
+        canvas.width = canvas.parentElement.clientWidth;
+        canvas.height = window.innerHeight - document.querySelector('.controls').clientHeight;
+        drawFrame(parseFloat(vSlider.value));
+      }
+      window.addEventListener('resize', resizeCanvas);
+      resizeCanvas();
+
+      function syncColors() {
+        if (selectedItem) {
+          if (selectedItem.type === 'point') {
+            const p = markedPoints.find(p => p.id === selectedItem.id);
+            if (p) p.color = document.getElementById('color_picker_' + p.id).value;
+          } else if (selectedItem.type === 'line') {
+            const l = lines.find(l => l.id === selectedItem.id);
+            if (l) l.color = document.getElementById('color_picker_' + l.id).value;
+          }
+          drawFrame(parseFloat(vSlider.value));
+        }
+      }
+
+      function getPhysViewportCorners() {
+        return [
+          toPhysicsX(0), toPhysicsT(0),
+          toPhysicsX(canvas.width), toPhysicsT(0),
+          toPhysicsX(canvas.width), toPhysicsT(canvas.height),
+          toPhysicsX(0), toPhysicsT(canvas.height)
+        ];
+      }
+
+      function drawGrid() {
+        ctx.strokeStyle = 'rgba(100,100,255,0.3)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+
+        const left = Math.floor(-offsetX - canvas.width / (2 * SCALE)) - 1;
+        const right = Math.ceil(-offsetX + canvas.width / (2 * SCALE)) + 1;
+        const bottom = Math.floor(-offsetY - canvas.height / (2 * SCALE)) - 1;
+        const top = Math.ceil(-offsetY + canvas.height / (2 * SCALE)) + 1;
+
+        for (let x = left; x <= right; x++) {
+          const cx = toCanvasX(x);
+          ctx.moveTo(cx, 0);
+          ctx.lineTo(cx, canvas.height);
+        }
+        for (let t = bottom; t <= top; t++) {
+          const cy = toCanvasY(t);
+          ctx.moveTo(0, cy);
+          ctx.lineTo(canvas.width, cy);
+        }
+        ctx.stroke();
+      }
+
+      function drawTransformedGrid(v) {
+        if (v === 0) return;
+
+        ctx.strokeStyle = 'rgba(255,0,0,0.15)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+
+        const corners = [
+          { x: toPhysicsX(0), t: toPhysicsT(0) },
+          { x: toPhysicsX(canvas.width), t: toPhysicsT(0) },
+          { x: toPhysicsX(canvas.width), t: toPhysicsT(canvas.height) },
+          { x: toPhysicsX(0), t: toPhysicsT(canvas.height) }
+        ];
+
+        let minX = Infinity, maxX = -Infinity, minT = Infinity, maxT = -Infinity;
+        for (const c of corners) {
+          const p = inverseLorentzTransform(c.x, c.t, v);
+          if (p.x < minX) minX = p.x;
+          if (p.x > maxX) maxX = p.x;
+          if (p.t < minT) minT = p.t;
+          if (p.t > maxT) maxT = p.t;
+        }
+        minX = Math.floor(minX) - 1;
+        maxX = Math.ceil(maxX) + 1;
+        minT = Math.floor(minT) - 1;
+        maxT = Math.ceil(maxT) + 1;
+
+        for (let x = minX; x <= maxX; x++) {
+          const start = lorentzTransform(x, minT, v);
+          const end = lorentzTransform(x, maxT, v);
+          ctx.moveTo(toCanvasX(start.x), toCanvasY(start.t));
+          ctx.lineTo(toCanvasX(end.x), toCanvasY(end.t));
+        }
+        for (let t = minT; t <= maxT; t++) {
+          const start = lorentzTransform(minX, t, v);
+          const end = lorentzTransform(maxX, t, v);
+          ctx.moveTo(toCanvasX(start.x), toCanvasY(start.t));
+          ctx.lineTo(toCanvasX(end.x), toCanvasY(end.t));
+        }
+        ctx.stroke();
+      }
+
+      function drawAxes() {
+        const ox = toCanvasX(0), oy = toCanvasY(0);
+
+        ctx.save();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = 'black';
+        ctx.beginPath();
+        ctx.moveTo(0, oy);
+        ctx.lineTo(canvas.width, oy);
+        ctx.moveTo(ox, 0);
+        ctx.lineTo(ox, canvas.height);
+        ctx.stroke();
+
+        ctx.fillStyle = 'black';
+        ctx.font = '14px Arial';
+
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        const leftPhysX = Math.floor(-offsetX - canvas.width / (2 * SCALE));
+        const rightPhysX = Math.ceil(-offsetX + canvas.width / (2 * SCALE));
+        for (let x = leftPhysX; x <= rightPhysX; x++) {
+          const cx = toCanvasX(x);
+          if (cx > 10 && cx < canvas.width - 10) {
+            ctx.fillText(x, cx, oy + 4);
+          }
+        }
+
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+
+        const topPhysT = Math.ceil(-offsetY + canvas.height / (2 * SCALE));
+        const bottomPhysT = Math.floor(-offsetY - canvas.height / (2 * SCALE));
+        for (let t = bottomPhysT; t <= topPhysT; t++) {
+          const cy = toCanvasY(t);
+          if (cy > 10 && cy < canvas.height - 10) {
+            ctx.fillText(t, ox - 5, cy);
+          }
+        }
+        ctx.restore();
+      }
+
+      function drawLightCones() {
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255,150,0,1)';
+        ctx.lineWidth = 3;
+        ctx.setLineDash([]);
+
+        const left = -offsetX - canvas.width / (2 * SCALE);
+        const right = -offsetX + canvas.width / (2 * SCALE);
+
+        ctx.beginPath();
+        ctx.moveTo(toCanvasX(left), toCanvasY(left));
+        ctx.lineTo(toCanvasX(right), toCanvasY(right));
+
+        ctx.moveTo(toCanvasX(left), toCanvasY(-left));
+        ctx.lineTo(toCanvasX(right), toCanvasY(-right));
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      function drawPoint(p, v) {
+        const t = lorentzTransform(p.x, p.t, v);
+        const cx = toCanvasX(t.x), cy = toCanvasY(t.t);
+
+        p.screenX = cx;
+        p.screenY = cy;
+
+        ctx.beginPath();
+        ctx.fillStyle = p.color;
+        ctx.lineWidth = (selectedItem && selectedItem.type === 'point' && selectedItem.id === p.id) ? 3 : 1;
+        ctx.shadowColor = (selectedItem && selectedItem.type === 'point' && selectedItem.id === p.id) ? '#4285F4' : 'transparent';
+        ctx.shadowBlur = (selectedItem && selectedItem.type === 'point' && selectedItem.id === p.id) ? 5 : 0;
+
+        ctx.arc(cx, cy, 6, 0, 2 * Math.PI);
+        ctx.fill();
+
+        ctx.strokeStyle = 'black';
+        ctx.stroke();
+      }
+
+      function calcLineCanvasCoords(line, v) {
+        const s = lorentzTransform(line.start.x, line.start.t, v);
+        const e = lorentzTransform(line.end.x, line.end.t, v);
+        const p1 = { x: toCanvasX(s.x), y: toCanvasY(s.t) };
+        const p2 = { x: toCanvasX(e.x), y: toCanvasY(e.t) };
+        return { p1, p2 };
+      }
+
+      function getExtendedPoints(line, v) {
+        const { p1, p2 } = calcLineCanvasCoords(line, v);
+        const dx = p2.x - p1.x, dy = p2.y - p1.y;
+
+        if (dx === 0 && dy === 0) return { start: p1, end: p2 };
+
+        const len = Math.sqrt(dx * dx + dy * dy);
+        const ux = dx / len, uy = dy / len;
+
+        if (line.type === 'segment') {
+          return { start: p1, end: p2 };
+        } else if (line.type === 'ray') {
+          let maxDist = 10000;
+          return {
+            start: p1,
+            end: { x: p1.x + ux * maxDist, y: p1.y + uy * maxDist }
+          };
+        } else if (line.type === 'line') {
+          function lineIntersectRect(p, ux, uy) {
+            let points = [];
+
+            if (uy !== 0) {
+              let t = (0 - p.y) / uy;
+              let x = p.x + ux * t;
+              if (x >= 0 && x <= canvas.width) points.push({ x, y: 0 });
+            }
+            if (uy !== 0) {
+              let t = (canvas.height - p.y) / uy;
+              let x = p.x + ux * t;
+              if (x >= 0 && x <= canvas.width) points.push({ x, y: canvas.height });
+            }
+            if (ux !== 0) {
+              let t = (0 - p.x) / ux;
+              let y = p.y + uy * t;
+              if (y >= 0 && y <= canvas.height) points.push({ x: 0, y });
+            }
+            if (ux !== 0) {
+              let t = (canvas.width - p.x) / ux;
+              let y = p.y + uy * t;
+              if (y >= 0 && y <= canvas.height) points.push({ x: canvas.width, y });
+            }
+
+            return points;
+          }
+
+          const pnts = lineIntersectRect(p1, ux, uy);
+          if (pnts.length < 2) {
+            return { start: p1, end: p2 };
+          }
+
+          let maxDist = 0;
+          let pair = [pnts[0], pnts[1]];
+          for (let i = 0; i < pnts.length; i++) {
+            for (let j = i + 1; j < pnts.length; j++) {
+              let dx = pnts[i].x - pnts[j].x;
+              let dy = pnts[i].y - pnts[j].y;
+              let dist = dx * dx + dy * dy;
+              if (dist > maxDist) {
+                maxDist = dist;
+                pair = [pnts[i], pnts[j]];
+              }
+            }
+          }
+          return { start: pair[0], end: pair[1] };
+        }
+      }
+
+      function drawLines(v) {
+        for (let line of lines) {
+          const pts = getExtendedPoints(line, v);
+          ctx.beginPath();
+          ctx.strokeStyle = line.color;
+          ctx.lineWidth = (selectedItem && selectedItem.type === 'line' && selectedItem.id === line.id) ? 3 : 1.5;
+          ctx.moveTo(pts.start.x, pts.start.y);
+          ctx.lineTo(pts.end.x, pts.end.y);
+          ctx.stroke();
+        }
+      }
+
+      function drawPoints(v) {
+        for (let p of markedPoints) {
+          drawPoint(p, v);
+        }
+      }
+
+      function drawFrame(v) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        drawGrid();
+        drawTransformedGrid(v);
+        drawAxes();
+        drawLightCones();
+        drawLines(v);
+        drawPoints(v);
+      }
+
+      modeBtn.onclick = () => {
+        isMarkerMode = !isMarkerMode;
+        if (isMarkerMode) {
+          modeBtn.textContent = '标记模式';
+          canvas.classList.add('marker-mode');
+        } else {
+          modeBtn.textContent = '拖动模式';
+          canvas.classList.remove('marker-mode');
+        }
+      };
+
+      canvas.onmousedown = (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+
+        if (isMarkerMode) {
+          // 标记模式 - 添加或选中点/线
+          const physX = toPhysicsX(mouseX);
+          const physT = toPhysicsT(mouseY);
+
+          // 先检查是否点击在已有点附近，选中该点
+          let foundPoint = null;
+          for (const p of markedPoints) {
+            const dx = p.screenX - mouseX;
+            const dy = p.screenY - mouseY;
+            if (Math.sqrt(dx * dx + dy * dy) < 10) {
+              foundPoint = p;
+              break;
+            }
+          }
+          if (foundPoint) {
+            selectItem('point', foundPoint.id);
+          } else {
+            // 否则添加新点
+            const newPoint = {
+              id: nextId++,
+              x: physX,
+              t: physT,
+              color: '#0077FF'
+            };
+            markedPoints.push(newPoint);
+            selectItem('point', newPoint.id);
+            updateUILists();
+            drawFrame(parseFloat(vSlider.value));
+          }
+        } else {
+          // 拖动模式 - 开始拖动平移画布
+          isDragging = true;
+          lastX = e.clientX;
+          lastY = e.clientY;
+          canvas.style.cursor = 'grabbing';
+        }
+      };
+
+      canvas.onmousemove = (e) => {
+        if (isDragging) {
+          const dx = (e.clientX - lastX) / SCALE;
+          const dy = (e.clientY - lastY) / SCALE;
+
+          offsetX += dx;
+          offsetY -= dy;
+
+          lastX = e.clientX;
+          lastY = e.clientY;
+
+          drawFrame(parseFloat(vSlider.value));
+        }
+      };
+
+      canvas.onmouseup = (e) => {
+        if (isDragging) {
+          isDragging = false;
+          canvas.style.cursor = isMarkerMode ? 'crosshair' : 'grab';
+        }
+      };
+
+      // 同步滑动条和数字输入框
+      vSlider.oninput = () => {
+        let val = parseFloat(vSlider.value);
+        vInput.value = val.toFixed(2);
+        drawFrame(val);
+      };
+      vInput.onchange = () => {
+        let val = parseFloat(vInput.value);
+        if (isNaN(val)) val = 0;
+        val = Math.min(0.99, Math.max(-0.99, val));
+        vInput.value = val.toFixed(2);
+        vSlider.value = val.toString();
+        drawFrame(val);
+      };
+
+      clearAllBtn.onclick = () => {
+        markedPoints = [];
+        lines = [];
+        selectedItem = null;
+        updateUILists();
+        drawFrame(parseFloat(vSlider.value));
+      };
+
+     function selectItem(type, id) {
+        if (isConnectingPoints && type === 'point') {
+          const point = markedPoints.find(p => p.id === id);
+          if (!connectStartPoint) {
+            connectStartPoint = point;
+            connectBtn.textContent = '选择第二个点'; // 提示用户
+          } else {
+            // 创建线段
+            const newLine = {
+              id: nextId++,
+              start: { x: connectStartPoint.x, t: connectStartPoint.t },
+              end: { x: point.x, t: point.t },
+              color: '#0077FF',
+              type: 'segment'
+            };
+            lines.push(newLine);
+            selectedItem = { type: 'line', id: newLine.id };
+            isConnectingPoints = false;
+            connectStartPoint = null;
+            connectBtn.textContent = '连接两点'; // 恢复按钮文字
+            updateUILists();
+            drawFrame(parseFloat(vSlider.value));
+          }
+        } else {
+          selectedItem = { type, id };
+        }
+        updateUILists();
+      }
+
+      // 连接按钮点击事件
+      connectBtn.onclick = () => {
+        if (!isConnectingPoints) {
+          isConnectingPoints = true;
+          connectStartPoint = null;
+          connectBtn.textContent = '取消连接';
+        } else {
+          isConnectingPoints = false;
+          connectStartPoint = null;
+          connectBtn.textContent = '连接两点';
+        }
+      };
+
+      // 在模式切换时重置连接状态
+      modeBtn.onclick = () => {
+        isMarkerMode = !isMarkerMode;
+        if (isMarkerMode) {
+          modeBtn.textContent = '标记模式';
+          canvas.classList.add('marker-mode');
+        } else {
+          modeBtn.textContent = '拖动模式';
+          canvas.classList.remove('marker-mode');
+        }
+        isConnectingPoints = false;
+        connectStartPoint = null;
+        connectBtn.textContent = '连接两点';
+      };
+
+      function updateUILists() {
+        // 清空列表
+        pointListEl.innerHTML = '';
+        lineListEl.innerHTML = '';
+
+        markedPoints.forEach(p => {
+          const li = document.createElement('li');
+          li.className = 'item' + (selectedItem && selectedItem.type === 'point' && selectedItem.id === p.id ? ' selected' : '');
+          li.dataset.id = p.id;
+
+          // 创建颜色选择输入
+          const colorInput = document.createElement('input');
+          colorInput.type = 'color';
+          colorInput.value = p.color;
+          colorInput.id = 'color_picker_' + p.id;
+          colorInput.addEventListener('input', () => {
+            p.color = colorInput.value;
+            drawFrame(parseFloat(vSlider.value));
+          });
+
+          const coordSpan = document.createElement('span');
+          coordSpan.textContent = `(${p.x.toFixed(2)}, ${p.t.toFixed(2)}) `;
+
+      // 删除按钮
+          const delBtn = document.createElement('button');
+          delBtn.textContent = '删除';
+          delBtn.className = 'delete-btn';
+          delBtn.onclick = (e) => {
+            e.stopPropagation();
+            markedPoints = markedPoints.filter(point => point.id !== p.id);
+            if (selectedItem && selectedItem.type === 'point' && selectedItem.id === p.id) {
+              selectedItem = null;
+            }
+            updateUILists();
+            drawFrame(parseFloat(vSlider.value));
+          };
+
+
+          const label = document.createElement('label');
+          label.textContent = `(${p.x.toFixed(2)}, ${p.t.toFixed(2)}) `;
+          label.prepend(colorInput);
+          label.appendChild(delBtn);  // 添加删除按钮
+          li.appendChild(label);
+          li.onclick = () => selectItem('point', p.id);
+
+          pointListEl.appendChild(li);
+        });
+
+        lines.forEach(l => {
+          const li = document.createElement('li');
+          li.className = 'item' + (selectedItem && selectedItem.type === 'line' && selectedItem.id === l.id ? ' selected' : '');
+          li.dataset.id = l.id;
+
+          // 线类型选择
+          const typeSelect = document.createElement('select');
+          lineTypes.forEach(type => {
+            const option = document.createElement('option');
+            option.value = type;
+            option.textContent = type;
+            if (l.type === type) option.selected = true;
+            typeSelect.appendChild(option);
+          });
+          typeSelect.onchange = () => {
+            l.type = typeSelect.value;
+            drawFrame(parseFloat(vSlider.value));
+          };
+
+          // 颜色选择
+          const colorInput = document.createElement('input');
+          colorInput.type = 'color';
+          colorInput.value = l.color;
+          colorInput.id = 'color_picker_' + l.id;
+          colorInput.addEventListener('input', () => {
+            l.color = colorInput.value;
+            drawFrame(parseFloat(vSlider.value));
+          });
+
+          // 起点坐标标签
+          const startLabel = document.createElement('span');
+          startLabel.textContent = `S(${l.start.x.toFixed(2)}, ${l.start.t.toFixed(2)}) `;
+
+          // 终点坐标标签
+          const endLabel = document.createElement('span');
+          endLabel.textContent = `E(${l.end.x.toFixed(2)}, ${l.end.t.toFixed(2)}) `;
+
+          const label = document.createElement('label');
+          label.appendChild(typeSelect);
+          label.appendChild(colorInput);
+          label.appendChild(startLabel);
+          label.appendChild(endLabel);
+
+          li.appendChild(label);
+
+          // 点击选中线
+          li.onclick = () => selectItem('line', l.id);
+
+          // 添加删除按钮
+          const delBtn = document.createElement('button');
+          delBtn.textContent = '删除';
+          delBtn.className = 'delete-btn';
+          delBtn.onclick = (e) => {
+            e.stopPropagation();
+            lines = lines.filter(line => line.id !== l.id);
+            if (selectedItem && selectedItem.type === 'line' && selectedItem.id === l.id) {
+              selectedItem = null;
+            }
+            updateUILists();
+            drawFrame(parseFloat(vSlider.value));
+          };
+
+          li.appendChild(delBtn);
+          lineListEl.appendChild(li);
+        });
+      }
+      // 右侧面板编辑选中的点或线属性
+
+      // 编辑点的坐标和颜色
+      function setupPointEditing(point) {
+        // 暂时没有额外控件，编辑点坐标可以通过右侧列表操作
+      }
+
+      // 编辑线的起点、终点坐标
+      function setupLineEditing(line) {
+        // 创建可编辑的输入框（使用弹窗或其他UI自行扩展）
+        // 当前示例中暂时未实现此功能
+      }
+
+      // 鼠标双击事件，用于连接两点，创建线
+      canvas.ondblclick = (e) => {
+        if (!isMarkerMode) return;
+
+        const rect = canvas.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+
+        let foundPoint = null;
+        for (const p of markedPoints) {
+          const dx = p.screenX - mouseX;
+          const dy = p.screenY - mouseY;
+          if (Math.sqrt(dx * dx + dy * dy) < 10) {
+            foundPoint = p;
+            break;
+          }
+        }
+
+        if (foundPoint) {
+          // 如果已有选中点，创建线；否则设为起点
+          if (selectedItem && selectedItem.type === 'point') {
+            const startPoint = markedPoints.find(p => p.id === selectedItem.id);
+            if (startPoint && startPoint.id !== foundPoint.id) {
+              // 创建线段，默认类型 segment，颜色蓝色
+              const newLine = {
+                id: nextId++,
+                start: { x: startPoint.x, t: startPoint.t },
+                end: { x: foundPoint.x, t: foundPoint.t },
+                color: '#0077FF',
+                type: 'segment'
+              };
+              lines.push(newLine);
+              selectedItem = { type: 'line', id: newLine.id };
+              updateUILists();
+              drawFrame(parseFloat(vSlider.value));
+            }
+          } else {
+            selectItem('point', foundPoint.id);
+          }
+        }
+      };
+
+      // 初始化样式
+      if (isMarkerMode) {
+        canvas.classList.add('marker-mode');
+      } else {
+        canvas.classList.remove('marker-mode');
+      }
+
+      // 默认状态下设置光标模式
+      canvas.style.cursor = isMarkerMode ? 'crosshair' : 'grab';
+
+      // 初始绘制
+      drawFrame(parseFloat(vSlider.value));
+    })();
+  </script>
+</body>
+</html>
+
+
