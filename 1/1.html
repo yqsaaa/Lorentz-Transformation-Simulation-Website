@@ -367,6 +367,10 @@
 
         ctx.strokeStyle = 'black';
         ctx.stroke();
+
+        ctx.lineWidth = 1;
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
       }
 
       function calcLineCanvasCoords(line, v) {
@@ -453,6 +457,7 @@
           ctx.moveTo(pts.start.x, pts.start.y);
           ctx.lineTo(pts.end.x, pts.end.y);
           ctx.stroke();
+          ctx.lineWidth = 1.5;
         }
       }
 
