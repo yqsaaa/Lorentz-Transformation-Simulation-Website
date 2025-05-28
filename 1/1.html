@@ -359,8 +359,6 @@
         ctx.beginPath();
         ctx.fillStyle = p.color;
         ctx.lineWidth = (selectedItem && selectedItem.type === 'point' && selectedItem.id === p.id) ? 3 : 1;
-        ctx.shadowColor = (selectedItem && selectedItem.type === 'point' && selectedItem.id === p.id) ? '#4285F4' : 'transparent';
-        ctx.shadowBlur = (selectedItem && selectedItem.type === 'point' && selectedItem.id === p.id) ? 5 : 0;
 
         ctx.arc(cx, cy, 6, 0, 2 * Math.PI);
         ctx.fill();
